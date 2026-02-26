@@ -1,0 +1,31 @@
+name: MacCMS Auto Sync
+
+on:
+  schedule:
+    - cron: '0 */1 * * *' # 每 1 小时自动运行一次
+  workflow_dispatch:      # 允许手动点击按钮运行
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v3
+
+      - name: 安装 Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: 安装依赖库
+        run: pip install mysql-connector-python pyTelegramBotAPI
+
+      - name: 执行同步任务
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASS: ${{ secrets.DB_PASS }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python sync_bot.py
