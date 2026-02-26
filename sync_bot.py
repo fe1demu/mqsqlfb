@@ -3,62 +3,72 @@ import mysql.connector
 import telebot
 import time
 
-# 从环境变量读取配置
+# 配置读取
 DB_CONFIG = {
     'host': os.environ.get('DB_HOST'),
     'user': os.environ.get('DB_USER'),
     'password': os.environ.get('DB_PASS'),
-    'database': os.environ.get('DB_NAME')
+    'database': os.environ.get('DB_NAME'),
+    'port': 3306,
+    'autocommit': True  # 关键：确保更新立即生效
 }
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
-CHANNEL_ID = os.environ.get('CHANNEL_ID')
+CHANNEL_ID = str(os.environ.get('CHANNEL_ID'))
 BASE_URL = 'https://tgzyz.pp.ua/'
 
 bot = telebot.TeleBot(BOT_TOKEN)
 
 def run():
+    conn = None
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
         cursor = conn.cursor(dictionary=True)
 
-        # 获取 type_id=41 的最新 1000 条数据
+        # 逻辑调整：
+        # 1. 先外层查询 type_id=41 的最近 1000 条 (DESC 降序)
+        # 2. 再将这 1000 条按时间升序排列 (ASC)，实现“先旧后新”
         query = """
-        SELECT vod_id, vod_name, vod_pic, vod_tag, vod_play_url, vod_play_note 
-        FROM mac_vod 
-        WHERE type_id = 41 
-        ORDER BY vod_time_add DESC 
-        LIMIT 1000
+        SELECT * FROM (
+            SELECT vod_id, vod_name, vod_pic, vod_tag, vod_play_url, vod_play_note, vod_time_add 
+            FROM mac_vod 
+            WHERE type_id = 41 
+            ORDER BY vod_time_add DESC 
+            LIMIT 1000
+        ) AS temp_table 
+        ORDER BY vod_time_add ASC
         """
         cursor.execute(query)
         rows = cursor.fetchall()
+        print(f"成功获取 {len(rows)} 条数据，开始处理...")
 
         for row in rows:
             vod_id = row['vod_id']
-            # 检查去重逻辑：判断当前频道ID是否在 vod_play_note 中
-            published_notes = str(row['vod_play_note'] or "")
-            if CHANNEL_ID in published_notes.split(','):
+            
+            # --- 严格去重检查 ---
+            current_note = str(row['vod_play_note'] or "")
+            if CHANNEL_ID in current_note.split(','):
                 continue
 
-            # --- 格式化 Caption ---
-            # 1. 第一行：标签处理 (#标签1 #标签2)
-            raw_tags = row['vod_tag'].replace('，', ',').split(',')
-            hashtag_line = " ".join([f"#{t.strip()}" for t in raw_tags if t.strip()])
+            # --- 内容处理 ---
+            tags = row['vod_tag'].replace('，', ',').split(',')
+            hashtag_line = " ".join([f"#{t.strip()}" for t in tags if t.strip()])
             
-            # 2. 第三行：标题 (vod_name)
-            content_title = row['vod_name']
+            # 处理超链接：截取 $ 后的部分
+            raw_url = row['vod_play_url'].split('$')[-1] if '$' in row['vod_play_url'] else row['vod_play_url']
             
-            # 3. 第五行：超链接处理
-            play_url = row['vod_play_url'].replace('HD$', '')
-            link_line = f"<a href='{play_url}'>📂立即观看</a>     <a href='https://aisoav.com'>🌐更多精彩收藏</a>"
+            caption = (
+                f"{hashtag_line}\n\n"
+                f"{row['vod_name']}\n\n"
+                f"<a href='{raw_url}'>📂立即观看</a>     "
+                f"<a href='https://aisoav.com'>🌐更多精彩收藏</a>"
+            )
             
-            # 组合全文
-            caption = f"{hashtag_line}\n\n{content_title}\n\n{link_line}"
-            
-            # 拼接图片URL
-            full_pic_url = BASE_URL + row['vod_pic']
+            # 图片拼接
+            pic = row['vod_pic']
+            full_pic_url = pic if pic.startswith('http') else BASE_URL + pic
 
             try:
-                # 发布到 Telegram (has_spoiler=True 实现成人内容遮盖)
+                # 发送 Telegram 消息
                 bot.send_photo(
                     CHANNEL_ID, 
                     full_pic_url, 
@@ -67,22 +77,29 @@ def run():
                     has_spoiler=True
                 )
 
-                # 更新 vod_play_note 标记已发布
-                new_note = f"{published_notes},{CHANNEL_ID}".strip(',')
+                # --- 标记回写数据库 ---
+                # 将 ID 拼接到原有内容后面
+                new_note = f"{current_note},{CHANNEL_ID}".strip(',')
+                
+                # 显式执行更新
                 update_sql = "UPDATE mac_vod SET vod_play_note = %s WHERE vod_id = %s"
                 cursor.execute(update_sql, (new_note, vod_id))
-                conn.commit()
                 
-                print(f"成功发布 ID {vod_id}: {content_title}")
-                time.sleep(3.5) # 遵守 Telegram 频率限制，每秒约 30 条限制，留出余量
+                # 记录日志方便在 GitHub Actions 中排查
+                print(f"✅ 发布成功并标记: {row['vod_name']} (ID: {vod_id})")
+                
+                # 适当延时防止 API 频率限制
+                time.sleep(3)
 
-            except Exception as e:
-                print(f"发布错误 ID {vod_id}: {e}")
+            except Exception as send_error:
+                print(f"❌ 发送失败 (ID {vod_id}): {send_error}")
 
-        cursor.close()
-        conn.close()
-    except Exception as e:
-        print(f"数据库连接失败: {e}")
+    except Exception as db_error:
+        print(f"💥 数据库错误: {db_error}")
+    finally:
+        if conn and conn.is_connected():
+            cursor.close()
+            conn.close()
 
 if __name__ == "__main__":
     run()
