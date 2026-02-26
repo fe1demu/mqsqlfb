@@ -4,7 +4,11 @@ on:
   schedule:
     - cron: '0 */1 * * *' # 每 1 小时自动运行一次
   workflow_dispatch:      # 允许手动点击按钮运行
-
+# 防止多个任务同时运行导致重复发帖
+concurrency:
+  group: sync-group
+  cancel-in-progress: false
+  
 jobs:
   build:
     runs-on: ubuntu-latest
